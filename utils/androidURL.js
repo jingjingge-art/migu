@@ -3,6 +3,7 @@ import { getddCalcuURL, getddCalcuURL720p } from "./ddCalcuURL.js";
 import { printDebug, printGreen, printRed, printYellow } from "./colorOut.js";
 import { fetchUrl } from "./net.js";
 import { enableH265, enableHDR } from "../config.js";
+import { delay } from "./fetchList.js";
 
 const client_id = getStringMD5(Date.now().toString())
 /**
