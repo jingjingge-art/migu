@@ -55,7 +55,7 @@ function interfaceStr(url, headers, urlUserId, urlToken) {
     replaceHost = `${replaceHost}/${pass}`
   }
 
-  if (urlUserId != userId && urlToken != token) {
+  if (urlUserId != userId || urlToken != token) {
     replaceHost = `${replaceHost}/${urlUserId}/${urlToken}`
   }
 
