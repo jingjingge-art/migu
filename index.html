@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>直播源播放器</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --line:#252a34;
+    --txt:#e8eaef; --sub:#8b93a3; --accent:#3b82f6;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;}
+  body{
+    background:var(--bg); color:var(--txt);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; height:100dvh; overflow:hidden;
+  }
+  body.web-fullscreen{
+    position:fixed; inset:0; z-index:9999; background:#000;
+  }
+
+  /* ============ 播放器：固定在上方 ============ */
+  .player{ flex:0 0 auto; background:#000; position:relative; }
+  .player video{
+    display:block; width:100%; aspect-ratio:16/9; max-height:42dvh;
+    object-fit:contain; background:#000;
+  }
+  body.web-fullscreen .player video{
+    max-height:100dvh;
+  }
+  .status{
+    display:flex; align-items:center; gap:8px;
+    padding:6px 12px; background:var(--card); border-bottom:1px solid var(--line);
+    font-size:12px; color:var(--sub); min-height:30px;
+  }
+  #nowPlaying{
+    color:var(--txt); font-weight:600; flex:1;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  #hint{ color:#f59e0b; white-space:nowrap; }
+
+  /* ============ 工具栏 ============ */
+  .toolbar{
+    flex:0 0 auto; display:flex; gap:6px; align-items:center;
+    padding:8px 10px; background:var(--card); border-bottom:1px solid var(--line);
+    flex-wrap:wrap;
+  }
+  .toolbar input[type=search]{
+    flex:1 1 120px; min-width:0;
+    background:#0d1017; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; font-size:14px; outline:none;
+  }
+  .toolbar input[type=search]:focus{ border-color:var(--accent); }
+  .toolbar select{
+    flex:0 0 auto; max-width:32%;
+    background:#0d1017; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px;
+    padding:8px 4px; font-size:12px; outline:none;
+  }
+  .toolbar button{
+    flex:0 0 auto; background:#0d1017; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px;
+    padding:8px 6px; font-size:12px;
+  }
+  .toolbar button:active{ border-color:var(--accent); }
+
+  /* ============ 频道列表：在下方滚动 ============ */
+  .list{ flex:1 1 auto; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:6px 0 24px; }
+  .item{
+    display:flex; align-items:center; gap:10px;
+    padding:10px 12px; border-bottom:1px solid rgba(37,42,52,.6);
+    cursor:pointer;
+  }
+  .item:active{ background:#1d222c; }
+  .item.active{ background:rgba(59,130,246,.14); box-shadow:inset 3px 0 0 var(--accent); }
+  .logo{
+    flex:0 0 40px; width:40px; height:40px; border-radius:8px;
+    background:#222834; object-fit:contain; display:block;
+  }
+  .meta{ flex:1 1 auto; min-width:0; }
+  .name{ font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .group{ font-size:11px; color:var(--sub); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .empty{ padding:28px 16px; text-align:center; color:var(--sub); font-size:13px; }
+
+  /* 清晰度面板 */
+  .quality-panel{
+    position:absolute; right:10px; bottom:40px; background:#171a21; border:1px solid var(--line);
+    border-radius:8px; padding:6px; display:none; z-index:10;
+  }
+  .quality-panel.show{display:block;}
+  .quality-panel button{
+    display:block; width:100%; text-align:left; background:transparent; border:none;
+    color:var(--txt); padding:4px 8px; font-size:12px; border-radius:4px;
+  }
+  .quality-panel button.active{background:var(--accent);}
+</style>
+</head>
+<body>
+
+<!-- 播放器固定在上 -->
+<header class="player">
+  <video id="video" controls playsinline webkit-playsinline></video>
+  <div class="quality-panel" id="qualityPanel"></div>
+  <div class="status">
+    <span id="nowPlaying">未选择频道</span>
+    <span id="hint"></span>
+  </div>
+</header>
+
+<!-- 搜索 / 分组 / 功能按钮 -->
+<div class="toolbar">
+  <input id="search" type="search" placeholder="搜索频道…">
+  <select id="groupSel"><option value="">全部分组</option></select>
+  <button id="prevBtn">上一个</button>
+  <button id="nextBtn">下一个</button>
+  <button id="copyBtn">复制链接</button>
+  <button id="speedBtn">倍速</button>
+  <button id="muteBtn">静音</button>
+  <button id="webFsBtn">网页全屏</button>
+  <button id="reloadBtn">刷新</button>
+  <button id="fileBtn">本地</button>
+</div>
+
+<!-- 频道列表在下 -->
+<div class="list" id="list"><div class="empty">正在加载直播源…</div></div>
+
+<input type="file" id="fileInput" accept=".m3u,.m3u8,.txt,text/plain" hidden>
+
+<script>
+/* ================== 配置区 ================== */
+const M3U_URL = 'https://gh-proxy.org/https://raw.githubusercontent.com/jingjingge-art/youtube/refs/heads/main/generated/%E7%9B%91%E6%8E%A7.m3u';
+const LAST_KEY = 'iptv_last_channel';
+const LOCAL_M3U_KEY = 'iptv_local_m3u';
+const USE_PROXY = false; // 跨域报错再打开，代理不稳定
+const PROXY_URL = 'https://api.allorigins.win/raw?url=';
+
+/* ================== 元素 ================== */
+const video     = document.getElementById('video');
+const listEl    = document.getElementById('list');
+const groupSel  = document.getElementById('groupSel');
+const searchEl  = document.getElementById('search');
+const nowEl     = document.getElementById('nowPlaying');
+const hintEl    = document.getElementById('hint');
+const fileInput = document.getElementById('fileInput');
+const qualityPanel = document.getElementById('qualityPanel');
+
+const prevBtn = document.getElementById('prevBtn');
+const nextBtn = document.getElementById('nextBtn');
+const copyBtn = document.getElementById('copyBtn');
+const speedBtn = document.getElementById('speedBtn');
+const muteBtn = document.getElementById('muteBtn');
+const webFsBtn = document.getElementById('webFsBtn');
+
+/* ================== 状态 ================== */
+let channels = [];
+let filtered = [];
+let current  = null;
+let hls      = null;
+let retryTimer = null;
+let retryCount = 0;
+let wakeLock = null;
+let webFull = false;
+const speedList = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+/* ================== M3U 解析 ================== */
+function parseM3U(text){
+  const out = [];
+  const lines = text.split(/\r?\n/);
+  let info = null;
+
+  for (let raw of lines){
+    const line = raw.trim();
+    if (!line) continue;
+
+    if (line.startsWith('#EXTINF')){
+      const attr = (k) => {
+        const m = line.match(new RegExp(k + '\\s*=\\s*"([^"]*)"', 'i'));
+        return m ? m[1].trim() : '';
+      };
+      const name = line.slice(line.lastIndexOf(',') + 1).trim();
+      info = {
+        name : name || attr('tvg-name') || '未命名频道',
+        group: attr('group-title') || '未分组',
+        logo : attr('tvg-logo') || ''
+      };
+      continue;
+    }
+
+    if (line.startsWith('#EXTGRP:')){
+      if (info) info.group = line.slice(8).trim() || info.group;
+      continue;
+    }
+
+    if (line.startsWith('#')) continue;
+
+    if (info){
+      out.push({ ...info, url: line });
+      info = null;
+    } else {
+      out.push({ name: line.split('/').pop() || '未命名频道', group: '未分组', logo: '', url: line });
+    }
+  }
+  return out;
+}
+
+/* ================== 加载与渲染 ================== */
+async function loadRemote(){
+  setListMessage('正在加载直播源…');
+  try{
+    const res = await fetch(M3U_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    applyChannels(parseM3U(text));
+  }catch(err){
+    setListMessage('加载失败：' + err.message +
+      '\n（可能是跨域限制或网络问题。可点「本地」按钮手动选择 .m3u 文件，或点「刷新」重试）');
+  }
+}
+
+function applyChannels(list){
+  channels = list;
+  if (!channels.length){
+    setListMessage('源里没有解析到任何频道');
+    return;
+  }
+  const groups = [...new Set(channels.map(c => c.group))];
+  groupSel.innerHTML = '<option value="">全部分组</option>' +
+    groups.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
+
+  render();
+
+  const lastUrl = localStorage.getItem(LAST_KEY);
+  const last = lastUrl && channels.find(c => c.url === lastUrl);
+  if (last) play(last, false);
+}
+
+function render(){
+  const kw = searchEl.value.trim().toLowerCase();
+  const g  = groupSel.value;
+
+  filtered = channels.filter(c =>
+    (!g || c.group === g) &&
+    (!kw || c.name.toLowerCase().includes(kw) || c.group.toLowerCase().includes(kw))
+  );
+
+  if (!filtered.length){
+    setListMessage('没有匹配的频道');
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  filtered.forEach((ch, i) => {
+    const el = document.createElement('div');
+    el.className = 'item' + (current && current.url === ch.url ? ' active' : '');
+    el.dataset.idx = i;
+    el.innerHTML =
+      (ch.logo
+        ? `<img class="logo" src="${escapeHtml(ch.logo)}" loading="lazy" onerror="this.style.visibility='hidden'">`
+        : `<div class="logo"></div>`) +
+      `<div class="meta">
+         <div class="name">${escapeHtml(ch.name)}</div>
+         <div class="group">${escapeHtml(ch.group)}</div>
+       </div>`;
+    el.addEventListener('click', () => play(ch, true));
+    frag.appendChild(el);
+  });
+
+  listEl.innerHTML = '';
+  listEl.appendChild(frag);
+}
+
+function setListMessage(msg){
+  listEl.innerHTML = `<div class="empty">${escapeHtml(msg).replace(/\n/g, '<br>')}</div>`;
+}
+
+function markActive(){
+  document.querySelectorAll('.item').forEach(el => {
+    const ch = filtered[+el.dataset.idx];
+    el.classList.toggle('active', !!(ch && current && ch.url === current.url));
+  });
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+/* ================== 播放 ================== */
+function getPlayUrl(rawUrl){
+  if (!USE_PROXY) return rawUrl;
+  return PROXY_URL + encodeURIComponent(rawUrl);
+}
+
+function play(ch, save){
+  current = ch;
+  retryCount = 0;
+  clearTimeout(retryTimer);
+  nowEl.textContent = ch.name;
+  setHint('加载中…');
+  markActive();
+  qualityPanel.classList.remove('show');
+  if (save) localStorage.setItem(LAST_KEY, ch.url);
+
+  destroyHls();
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+
+  const playUrl = getPlayUrl(ch.url);
+  const isHls = /\.m3u8(\?|$)/i.test(playUrl);
+
+  if (isHls && window.Hls && Hls.isSupported()){
+    hls = new Hls({
+      maxBufferLength: 20,
+      manifestLoadingTimeOut: 12000,
+      manifestLoadingMaxRetry: 2,
+      fragLoadingMaxRetry: 3
+    });
+    hls.loadSource(playUrl);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      setHint('');
+      renderQuality();
+      safePlay();
+    });
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && retryCount < 3){
+        retryCount++;
+        setHint('网络错误，重试中(' + retryCount + ')…');
+        retryTimer = setTimeout(() => hls && hls.startLoad(), 2500);
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR){
+        setHint('解码错误，尝试恢复…');
+        try { hls.recoverMediaError(); } catch(e){ setHint('该频道无法播放'); }
+      } else {
+        setHint('该频道无法播放');
+        destroyHls();
+      }
+    });
+  } else {
+    video.src = playUrl;
+    video.addEventListener('loadedmetadata', () => setHint(''), { once: true });
+    video.addEventListener('error', () => setHint('该频道无法播放'), { once: true });
+    safePlay();
+  }
+  keepScreenOn();
+}
+
+function renderQuality(){
+  if(!hls) return;
+  const levels = hls.levels;
+  qualityPanel.innerHTML = '';
+  const autoBtn = document.createElement('button');
+  autoBtn.textContent = '自动';
+  autoBtn.onclick = ()=>{hls.currentLevel = -1; renderQuality();};
+  qualityPanel.appendChild(autoBtn);
+  levels.forEach((lv,i)=>{
+    const b = document.createElement('button');
+    b.textContent = `${lv.height}p`;
+    if(hls.currentLevel === i) b.classList.add('active');
+    b.onclick = ()=>{hls.currentLevel = i; renderQuality();};
+    qualityPanel.appendChild(b);
+  })
+}
+
+function safePlay(){
+  const p = video.play();
+  if (p && p.catch) p.catch(() => setHint('点击播放按钮开始'));
+}
+
+function destroyHls(){
+  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+}
+
+function setHint(txt){
+  hintEl.textContent = txt;
+}
+
+/* ================== 辅助功能 ================== */
+function prevChannel(){
+  if(!current) return;
+  const idx = filtered.findIndex(x=>x.url === current.url);
+  if(idx <= 0) return;
+  play(filtered[idx-1], true);
+}
+function nextChannel(){
+  if(!current) return;
+  const idx = filtered.findIndex(x=>x.url === current.url);
+  if(idx >= filtered.length -1) return;
+  play(filtered[idx+1], true);
+}
+async function copyUrl(){
+  if(!current) return alert('暂无播放频道');
+  try{
+    await navigator.clipboard.writeText(current.url);
+    alert('链接已复制！');
+  }catch(e){alert('复制失败：' + current.url);}
+}
+function toggleSpeed(){
+  const idx = speedList.indexOf(video.playbackRate);
+  const next = speedList[(idx+1) % speedList.length];
+  video.playbackRate = next;
+  alert('倍速：' + next + 'x');
+}
+function toggleMute(){
+  video.muted = !video.muted;
+  muteBtn.textContent = video.muted ? '取消静音' : '静音';
+}
+function toggleWebFull(){
+  webFull = !webFull;
+  document.body.classList.toggle('web-fullscreen', webFull);
+  webFsBtn.textContent = webFull ? '退出全屏' : '网页全屏';
+}
+async function keepScreenOn(){
+  if (!('wakeLock' in navigator)) return;
+  try{
+    wakeLock = await navigator.wakeLock.request('screen');
+  }catch(e){}
+}
+
+/* ================== 事件绑定 ================== */
+let searchTimer;
+searchEl.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(render, 180);
+});
+
+groupSel.addEventListener('change', render);
+document.getElementById('reloadBtn').addEventListener('click', loadRemote);
+document.getElementById('fileBtn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  localStorage.setItem(LOCAL_M3U_KEY, text);
+  applyChannels(parseM3U(text));
+  fileInput.value = '';
+});
+prevBtn.onclick = prevChannel;
+nextBtn.onclick = nextChannel;
+copyBtn.onclick = copyUrl;
+speedBtn.onclick = toggleSpeed;
+muteBtn.onclick = toggleMute;
+webFsBtn.onclick = toggleWebFull;
+
+// 键盘快捷键
+document.addEventListener('keydown', e=>{
+  if(e.code === 'Space'){e.preventDefault(); video.paused ? video.play() : video.pause();}
+  if(e.code === 'KeyF') toggleWebFull();
+  if(e.code === 'ArrowLeft') prevChannel();
+  if(e.code === 'ArrowRight') nextChannel();
+})
+
+window.addEventListener('beforeunload', ()=>{
+  destroyHls();
+  if(wakeLock) wakeLock.release();
+});
+
+// 优先读取本地缓存m3u
+const localM3u = localStorage.getItem(LOCAL_M3U_KEY);
+if(localM3u){
+  applyChannels(parseM3U(localM3u));
+}else{
+  loadRemote();
+}
+</script>
+</body>
+</html>
